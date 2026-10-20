@@ -1,69 +1,201 @@
-import Image from "next/image";
+'use client';
+
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { InvoiceTabs } from '@/components/InvoiceTabs';
+import { InvoiceTable, InvoiceTableSkeleton } from '@/components/InvoiceTable';
+import { InvoiceDetailPanel } from '@/components/InvoiceDetailPanel';
+import { Toast } from '@/components/Toast';
+import { fetchInvoices, fetchInvoiceDetail, updateInvoiceStatus, getUserMessage } from '@/lib/api-client';
+import type { InvoiceTab } from '@/lib/status';
+import type { Invoice, InvoiceDetail, StatusCounts } from '@/lib/types';
+
+const EMPTY_LABELS: Record<InvoiceTab, string> = {
+  processing: 'No invoices waiting to be processed.',
+  needs_review: 'Nothing flagged for review right now.',
+  decided: 'No decisions have been made yet.',
+};
+
+const WEB_PAGE_SIZE = 10;
+const MOBILE_PAGE_SIZE = 5;
+
+function usePageSize() {
+  const [pageSize, setPageSize] = useState(WEB_PAGE_SIZE);
+
+  useEffect(() => {
+    const mql = window.matchMedia('(min-width: 640px)');
+    const sync = () => setPageSize(mql.matches ? WEB_PAGE_SIZE : MOBILE_PAGE_SIZE);
+    sync();
+    mql.addEventListener('change', sync);
+    return () => mql.removeEventListener('change', sync);
+  }, []);
+
+  return pageSize;
+}
 
 export default function Home() {
+  const [tab, setTab] = useState<InvoiceTab>('processing');
+  const [invoices, setInvoices] = useState<Invoice[]>([]);
+  const [counts, setCounts] = useState<StatusCounts>();
+  const [page, setPage] = useState(1);
+  const [totalPages, setTotalPages] = useState(1);
+  const [totalInTab, setTotalInTab] = useState(0);
+  const [listLoading, setListLoading] = useState(true);
+  const [listError, setListError] = useState<string | null>(null);
+
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [detail, setDetail] = useState<InvoiceDetail | null>(null);
+  const [detailLoading, setDetailLoading] = useState(false);
+
+  const [toast, setToast] = useState<{ message: string; tone: 'success' | 'error' } | null>(null);
+
+  const pageSize = usePageSize();
+
+  const loadList = useCallback((currentTab: InvoiceTab, currentPage: number, currentPageSize: number) => {
+    setListLoading(true);
+    setListError(null);
+    fetchInvoices(currentTab, currentPage, currentPageSize)
+      .then((res) => {
+        // The current page can go stale (e.g. the last invoice on the last
+        // page just got decided and moved to a different tab) — step back
+        // one page rather than showing an empty page that isn't actually page 1.
+        if (res.data.length === 0 && currentPage > 1) {
+          setPage(currentPage - 1);
+          return;
+        }
+        setInvoices(res.data);
+        setCounts(res.meta.counts);
+        setTotalPages(res.meta.totalPages);
+        setTotalInTab(res.meta.total);
+      })
+      .catch((err) => setListError(getUserMessage(err, 'Failed to load invoices.')))
+      .finally(() => setListLoading(false));
+  }, []);
+
+  useEffect(() => {
+    // Synchronizing with the server on tab/page change — the React-docs
+    // pattern for data fetching in an effect, which necessarily sets loading
+    // state synchronously before the fetch resolves.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    loadList(tab, page, pageSize);
+  }, [tab, page, pageSize, loadList]);
+
+  const prevPageSize = useRef(pageSize);
+  useEffect(() => {
+    // Crossing the mobile/desktop breakpoint changes page size, so page 2 at
+    // the old size may no longer mean anything — jump back to page 1.
+    if (prevPageSize.current !== pageSize) {
+      prevPageSize.current = pageSize;
+      setPage(1);
+    }
+  }, [pageSize]);
+
+  function changeTab(nextTab: InvoiceTab) {
+    setTab(nextTab);
+    setPage(1);
+  }
+
+  const openInvoice = useCallback((id: string) => {
+    setSelectedId(id);
+    setDetailLoading(true);
+    fetchInvoiceDetail(id)
+      .then(setDetail)
+      .catch((err) =>
+        setToast({ message: getUserMessage(err, 'Failed to load invoice details.'), tone: 'error' }),
+      )
+      .finally(() => setDetailLoading(false));
+  }, []);
+
+  async function handleDecide(status: 'APPROVED' | 'REJECTED', note?: string) {
+    if (!detail) return;
+    await updateInvoiceStatus(detail.id, { status, note, version: detail.version });
+    setToast({ message: `Invoice ${status === 'APPROVED' ? 'approved' : 'rejected'}.`, tone: 'success' });
+    setSelectedId(null);
+    setDetail(null);
+    loadList(tab, page, pageSize);
+  }
+
+  const rangeStart = totalInTab === 0 ? 0 : (page - 1) * pageSize + 1;
+  const rangeEnd = Math.min(page * pageSize, totalInTab);
+
   return (
-    <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert h-5 w-[100px]"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the{" "}
-            <code className="rounded bg-black/[.06] px-1.5 py-0.5 font-mono text-[0.9em] dark:bg-white/[.08]">
-              page.tsx
-            </code>{" "}
-            file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
+    <div className="mx-auto flex w-full max-w-6xl flex-1 flex-col px-4 py-6 sm:px-6 sm:py-8">
+      <header className="mb-4 sm:mb-6">
+        <h1 className="text-lg font-semibold text-slate-900 sm:text-xl">Invoice approval desk</h1>
+        <p className="mt-1 text-sm text-slate-500">Review incoming invoices and decide what gets paid.</p>
+      </header>
+
+      <div className="flex flex-1 overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
+        {/* On mobile, the list and the detail panel are mutually exclusive full-width
+            views; from md up they sit side by side. */}
+        <div
+          className={`min-w-0 flex-1 flex-col ${selectedId ? 'hidden md:flex' : 'flex'}`}
+        >
+          <div className="overflow-x-auto px-2">
+            <InvoiceTabs active={tab} counts={counts} onChange={changeTab} />
+          </div>
+
+          <div className="flex-1 overflow-y-auto">
+            {listLoading ? (
+              <InvoiceTableSkeleton />
+            ) : listError ? (
+              <div className="flex flex-1 items-center justify-center py-24 text-sm text-rose-600">
+                {listError}
+              </div>
+            ) : (
+              <InvoiceTable
+                invoices={invoices}
+                selectedId={selectedId ?? undefined}
+                onSelect={openInvoice}
+                emptyLabel={EMPTY_LABELS[tab]}
+              />
+            )}
+          </div>
+
+          {!listLoading && !listError && totalInTab > 0 && (
+            <div className="flex items-center justify-between border-t border-slate-100 px-4 py-2.5 text-sm text-slate-500">
+              <span>
+                {rangeStart}–{rangeEnd} of {totalInTab}
+              </span>
+              <div className="flex gap-1">
+                <button
+                  onClick={() => setPage((p) => p - 1)}
+                  disabled={page <= 1}
+                  className="rounded-md border border-slate-200 px-2.5 py-1 font-medium text-slate-600 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40 cursor-pointer"
+                >
+                  Prev
+                </button>
+                <span className="px-1 tabular-nums">
+                  {page} / {totalPages}
+                </span>
+                <button
+                  onClick={() => setPage((p) => p + 1)}
+                  disabled={page >= totalPages}
+                  className="rounded-md border border-slate-200 px-2.5 py-1 font-medium text-slate-600 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40 cursor-pointer"
+                >
+                  Next
+                </button>
+              </div>
+            </div>
+          )}
         </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert h-[14px] w-4"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={14}
+
+        {selectedId && (
+          <div className="w-full shrink-0 md:w-[26rem] md:border-l md:border-slate-200">
+            <InvoiceDetailPanel
+              invoice={detail}
+              loading={detailLoading}
+              onClose={() => {
+                setSelectedId(null);
+                setDetail(null);
+              }}
+              onDecide={handleDecide}
+              onSelectDuplicateOf={openInvoice}
             />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
-        </div>
-      </main>
+          </div>
+        )}
+      </div>
+
+      {toast && <Toast message={toast.message} tone={toast.tone} onDismiss={() => setToast(null)} />}
     </div>
   );
 }
